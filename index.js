@@ -1,9 +1,13 @@
-// index.js - El Microservicio de Descarga con yt-dlp
+// index.js - El Microservicio de Descarga con yt-dlp y ffmpeg desde NPM
 const express = require('express');
 const yt = require('yt-search');
 const ytdlp = require('yt-dlp-exec');
 const fs = require('fs');
 const path = require('path');
+const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
+
+// Le decimos a yt-dlp-exec dónde encontrar ffmpeg
+ytdlp.setFfmpegPath(ffmpegPath);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -23,34 +27,45 @@ app.get('/search', async (req, res) => {
         const videoUrl = video.url;
         tempFilePath = path.join(__dirname, `temp_audio_${Date.now()}.mp3`);
 
-        // Ejecutamos yt-dlp como un proceso de línea de comandos
+        // Ejecutamos yt-dlp
         await ytdlp(videoUrl, {
             output: tempFilePath,
-            format: 'bestaudio[ext=m4a]/bestaudio', // Descarga el mejor audio, preferiblemente m4a
+            noCheckCertificates: true,
+            noWarnings: true,
+            format: 'bestaudio[ext=m4a]/bestaudio',
             extractAudio: true,
             audioFormat: 'mp3',
-            audioQuality: 0, // 0 es la mejor calidad
+            audioQuality: 0,
         });
+
+        // Verificamos si el archivo se creó
+        if (!fs.existsSync(tempFilePath) || fs.statSync(tempFilePath).size === 0) {
+            throw new Error('El archivo de salida de yt-dlp está vacío o no se creó.');
+        }
 
         res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(video.title)}.mp3"`);
         const readStream = fs.createReadStream(tempFilePath);
+        
         readStream.pipe(res);
 
         // Limpieza del archivo después de que se termine de enviar
         readStream.on('end', () => {
-            fs.unlink(tempFilePath, () => {});
+            fs.unlink(tempFilePath, (err) => {
+                if (err) console.error("Error al eliminar el archivo temporal en 'end':", err);
+            });
         });
         readStream.on('error', (err) => {
+            console.error("Error en el stream de lectura:", err);
             fs.unlink(tempFilePath, () => {});
         });
 
     } catch (error) {
         if (tempFilePath) fs.unlink(tempFilePath, () => {});
-        console.error('Error en yt-dlp:', error);
-        res.status(500).json({ error: 'Error interno al procesar con yt-dlp.' });
+        console.error('Error en el proceso de yt-dlp:', error);
+        res.status(500).json({ error: 'Error interno al procesar con yt-dlp.', details: error.message });
     }
 });
 
 app.listen(PORT, () => {
-    console.log(`Servicio de descarga con yt-dlp en puerto ${PORT}`);
+    console.log(`Servicio de descarga con yt-dlp (NPM) en puerto ${PORT}`);
 });
