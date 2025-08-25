@@ -1,65 +1,53 @@
-// index.js - El Microservicio que usa binarios locales
+// index.js - El Microservicio que replica la lógica del plugin original
 const express = require('express');
 const yt = require('yt-search');
-const { execFile } = require('child_process'); // Usamos el ejecutor de procesos de Node
-const { promisify } = require('util');
-const fs = require('fs');
-const path = require('path');
-
-const execFileAsync = promisify(execFile);
-
-// Rutas a nuestros binarios descargados
-const YTDLP_PATH = path.join(__dirname, 'bin', 'yt-dlp');
-const FFMPEG_PATH = path.join(__dirname, 'bin', 'ffmpeg');
+const ytdl = require('ytdl-core');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
-const MAX_DURATION = 900;
+const PORT = process.env.PORT || 8080; // Usamos un puerto común
+const MAX_DURATION = 900; // 15 minutos
 
-app.get('/search', async (req, res) => {
+// El endpoint que tu bot principal llamará
+app.get('/download', async (req, res) => {
     const query = req.query.q;
-    if (!query) return res.status(400).json({ error: 'Falta el parámetro ?q=' });
 
-    let tempFilePath = '';
+    if (!query) {
+        return res.status(400).json({ error: 'Falta el parámetro de búsqueda ?q=' });
+    }
+
     try {
+        // 1. Buscar el video con yt-search
+        console.log(`[Microservicio] Buscando: "${query}"`);
         const search = await yt.search(query);
         const video = search.videos[0];
-        if (!video) return res.status(404).json({ error: 'No se encontraron resultados.' });
-        if (video.seconds > MAX_DURATION) return res.status(413).json({ error: `Video muy largo.` });
 
-        const videoUrl = video.url;
-        tempFilePath = path.join(__dirname, `temp_audio_${Date.now()}.mp3`);
-
-        // Ejecutamos yt-dlp como un comando, especificando la ruta de ffmpeg
-        console.log(`Ejecutando: ${YTDLP_PATH} ...`);
-        await execFileAsync(YTDLP_PATH, [
-            videoUrl,
-            '-o', tempFilePath,
-            '--ffmpeg-location', FFMPEG_PATH,
-            '-x', // Extraer audio
-            '--audio-format', 'mp3',
-            '--audio-quality', '0', // Mejor calidad
-            '--no-check-certificate',
-            '--no-warnings',
-        ]);
-
-        if (!fs.existsSync(tempFilePath) || fs.statSync(tempFilePath).size === 0) {
-            throw new Error('El archivo de salida de yt-dlp está vacío o no se creó.');
+        if (!video) {
+            console.log(`[Microservicio] No se encontraron resultados.`);
+            return res.status(404).json({ error: 'No se encontraron resultados.' });
         }
+        if (video.seconds > MAX_DURATION) {
+            console.log(`[Microservicio] Video demasiado largo: ${video.timestamp}`);
+            return res.status(413).json({ error: `El video es demasiado largo (${video.seconds}s).` });
+        }
+        
+        console.log(`[Microservicio] Descargando: "${video.title}"`);
 
+        // 2. Establecer las cabeceras para que el cliente sepa que es un archivo
         res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(video.title)}.mp3"`);
-        const readStream = fs.createReadStream(tempFilePath);
-        readStream.pipe(res);
-        readStream.on('end', () => fs.unlink(tempFilePath, () => {}));
-        readStream.on('error', () => fs.unlink(tempFilePath, () => {}));
+        
+        // 3. Usar ytdl-core para obtener el stream de audio y enviarlo directamente en la respuesta
+        // El método .pipe() es muy eficiente, envía los datos a medida que se descargan.
+        ytdl(video.url, { filter: 'audioonly', quality: 'highestaudio' }).pipe(res);
 
     } catch (error) {
-        if (tempFilePath) fs.unlink(tempFilePath, () => {});
-        console.error('Error en el proceso de yt-dlp:', error);
-        res.status(500).json({ error: 'Error interno al procesar con yt-dlp.', details: error.stderr || error.message });
+        console.error('[Microservicio] Error:', error.message);
+        // Evitamos enviar una respuesta de error HTML completa si ya se han enviado las cabeceras.
+        if (!res.headersSent) {
+            res.status(500).json({ error: 'Ocurrió un error interno.', details: error.message });
+        }
     }
 });
 
 app.listen(PORT, () => {
-    console.log(`Servicio de descarga (binarios locales) en puerto ${PORT}`);
+    console.log(`Microservicio de descarga listo en http://localhost:${PORT}`);
 });
