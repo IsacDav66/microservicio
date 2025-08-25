@@ -1,17 +1,20 @@
-// index.js - El Microservicio de Descarga con yt-dlp y ffmpeg desde NPM
+// index.js - El Microservicio que usa binarios locales
 const express = require('express');
 const yt = require('yt-search');
-const ytdlp = require('yt-dlp-exec');
+const { execFile } = require('child_process'); // Usamos el ejecutor de procesos de Node
+const { promisify } = require('util');
 const fs = require('fs');
 const path = require('path');
-const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
 
-// Le decimos a yt-dlp-exec dónde encontrar ffmpeg
-ytdlp.setFfmpegPath(ffmpegPath);
+const execFileAsync = promisify(execFile);
+
+// Rutas a nuestros binarios descargados
+const YTDLP_PATH = path.join(__dirname, 'bin', 'yt-dlp');
+const FFMPEG_PATH = path.join(__dirname, 'bin', 'ffmpeg');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const MAX_DURATION = 900; // 15 minutos
+const MAX_DURATION = 900;
 
 app.get('/search', async (req, res) => {
     const query = req.query.q;
@@ -27,45 +30,36 @@ app.get('/search', async (req, res) => {
         const videoUrl = video.url;
         tempFilePath = path.join(__dirname, `temp_audio_${Date.now()}.mp3`);
 
-        // Ejecutamos yt-dlp
-        await ytdlp(videoUrl, {
-            output: tempFilePath,
-            noCheckCertificates: true,
-            noWarnings: true,
-            format: 'bestaudio[ext=m4a]/bestaudio',
-            extractAudio: true,
-            audioFormat: 'mp3',
-            audioQuality: 0,
-        });
+        // Ejecutamos yt-dlp como un comando, especificando la ruta de ffmpeg
+        console.log(`Ejecutando: ${YTDLP_PATH} ...`);
+        await execFileAsync(YTDLP_PATH, [
+            videoUrl,
+            '-o', tempFilePath,
+            '--ffmpeg-location', FFMPEG_PATH,
+            '-x', // Extraer audio
+            '--audio-format', 'mp3',
+            '--audio-quality', '0', // Mejor calidad
+            '--no-check-certificate',
+            '--no-warnings',
+        ]);
 
-        // Verificamos si el archivo se creó
         if (!fs.existsSync(tempFilePath) || fs.statSync(tempFilePath).size === 0) {
             throw new Error('El archivo de salida de yt-dlp está vacío o no se creó.');
         }
 
         res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(video.title)}.mp3"`);
         const readStream = fs.createReadStream(tempFilePath);
-        
         readStream.pipe(res);
-
-        // Limpieza del archivo después de que se termine de enviar
-        readStream.on('end', () => {
-            fs.unlink(tempFilePath, (err) => {
-                if (err) console.error("Error al eliminar el archivo temporal en 'end':", err);
-            });
-        });
-        readStream.on('error', (err) => {
-            console.error("Error en el stream de lectura:", err);
-            fs.unlink(tempFilePath, () => {});
-        });
+        readStream.on('end', () => fs.unlink(tempFilePath, () => {}));
+        readStream.on('error', () => fs.unlink(tempFilePath, () => {}));
 
     } catch (error) {
         if (tempFilePath) fs.unlink(tempFilePath, () => {});
         console.error('Error en el proceso de yt-dlp:', error);
-        res.status(500).json({ error: 'Error interno al procesar con yt-dlp.', details: error.message });
+        res.status(500).json({ error: 'Error interno al procesar con yt-dlp.', details: error.stderr || error.message });
     }
 });
 
 app.listen(PORT, () => {
-    console.log(`Servicio de descarga con yt-dlp (NPM) en puerto ${PORT}`);
+    console.log(`Servicio de descarga (binarios locales) en puerto ${PORT}`);
 });
